@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+-   geojson: add `UnmarshalGeometryWithDimension`, a unified dimension entry for geometry construction. After declaring 2D or 3D every position, including those in nested geometry collections, must match or a `DimensionError` with the offending path is returned before any geometry is constructed
+
 ## [v0.13.0](https://github.com/paulmach/orb/compare/v0.12.0...v0.13.0) - 2026-03-30
 
 ### Fixed
