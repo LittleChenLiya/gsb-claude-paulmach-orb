@@ -38,3 +38,20 @@ fmt.Println(l)
 // Output:
 // 12
 ```
+
+Classify a point as interior, on the boundary or exterior of a polygon with
+one outer ring and up to one hole:
+
+```go
+p := orb.Polygon{
+    {{0, 0}, {0, 4}, {4, 4}, {4, 0}, {0, 0}},
+    {{1, 1}, {1, 3}, {3, 3}, {3, 1}, {1, 1}},
+}
+
+planar.PolygonPointPosition(p, orb.Point{0.5, 0.5}) // planar.Interior
+planar.PolygonPointPosition(p, orb.Point{2, 2})     // planar.Exterior (in the hole)
+planar.PolygonPointPosition(p, orb.Point{0, 2})     // planar.Boundary
+```
+
+The result does not depend on the direction of the rings and the input
+polygon is not modified.

@@ -30,6 +30,32 @@ func ExampleDistance() {
 	// 5
 }
 
+func ExamplePolygonPointPosition() {
+	// square outer ring with a square hole in the middle
+	p := orb.Polygon{
+		{{0, 0}, {0, 4}, {4, 4}, {4, 0}, {0, 0}},
+		{{1, 1}, {1, 3}, {3, 3}, {3, 1}, {1, 1}},
+	}
+
+	for _, point := range []orb.Point{
+		{0.5, 0.5}, // interior
+		{2, 2},     // inside the hole, so exterior
+		{0, 2},     // on the outer edge
+	} {
+		fmt.Println(point, planar.PolygonPointPosition(p, point))
+	}
+
+	// reversing the rings does not change the result
+	p[0].Reverse()
+	p[1].Reverse()
+	fmt.Println(planar.PolygonPointPosition(p, orb.Point{2, 2}))
+	// Output:
+	// [0.5 0.5] 2
+	// [2 2] 0
+	// [0 2] 1
+	// 0
+}
+
 func ExampleLength() {
 	// +
 	// |\

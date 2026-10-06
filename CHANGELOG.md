@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- planar: `PolygonPointPosition` classifies a point as `Interior`, `Boundary` or `Exterior` for a polygon with one outer ring and up to one hole. Ring orientation is ignored and the input polygon is not modified. The existing `PolygonContains` boolean interface is unchanged.
+
 ## [v0.13.0](https://github.com/paulmach/orb/compare/v0.12.0...v0.13.0) - 2026-03-30
 
 ### Fixed
