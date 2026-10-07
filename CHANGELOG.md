@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+-   `Polygon.Close`/`MultiPolygon.Close`: lossless ring closure helpers that append the first point to unclosed non-empty rings only, preserve ring order and dimensions, and return a locating `*RingClosureError` for rings with fewer than 3 distinct points without modifying the original geometry
+-   geojson: `Geometry.CloseRings` and `UnmarshalGeometryClosed` to apply the lossless ring closure when decoding GeoJSON polygons and multipolygons
+
 ## [v0.13.0](https://github.com/paulmach/orb/compare/v0.12.0...v0.13.0) - 2026-03-30
 
 ### Fixed
