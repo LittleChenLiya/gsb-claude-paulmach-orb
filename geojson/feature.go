@@ -9,6 +9,28 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+// PropertiesMode controls how the "properties" member of a feature is
+// serialized to JSON.
+type PropertiesMode int
+
+const (
+	// PropertiesCompat is the default and historical behavior: nil and
+	// empty properties are both encoded as JSON null and the "properties"
+	// member is always present in the output.
+	PropertiesCompat PropertiesMode = iota
+
+	// PropertiesStrict preserves the three possible states of the
+	// "properties" member so they survive a decode/encode round trip:
+	//
+	//   - absent: the member is omitted from the output
+	//   - null:   the member is encoded as JSON null
+	//   - object: the member is encoded as is, even when empty ({})
+	//
+	// The FeatureOf.PropertiesPresent field, recorded during decoding,
+	// is used to distinguish an absent member from an explicit null.
+	PropertiesStrict
+)
+
 // A FeatureOf corresponds to GeoJSON feature object but allows for a generic type for the properties.
 // This allows users to unmarshal into a struct instead of a map if they choose.
 //
@@ -20,6 +42,17 @@ type FeatureOf[P any] struct {
 	BBox       BBox         `json:"bbox,omitempty"`
 	Geometry   orb.Geometry `json:"geometry"`
 	Properties P            `json:"properties"`
+
+	// PropertiesMode controls how the "properties" member is encoded to
+	// JSON. The zero value, PropertiesCompat, keeps the historical output.
+	// It currently applies to JSON marshaling only, BSON output is unchanged.
+	PropertiesMode PropertiesMode `json:"-" bson:"-"`
+
+	// PropertiesPresent records whether the "properties" member was present
+	// when the feature was decoded from JSON. It is consulted when encoding
+	// with PropertiesStrict to tell an absent member apart from an explicit
+	// null. It has no effect with the default PropertiesCompat mode.
+	PropertiesPresent bool `json:"-" bson:"-"`
 
 	// ExtraMembers can be used to encoded/decode extra key/members in
 	// the base of the feature object. Note that keys of "id", "type", "bbox"
@@ -55,11 +88,30 @@ var _ orb.Pointer = &FeatureOf[any]{}
 // Items in the ExtraMembers map will be included in the base of the
 // feature object.
 func (f FeatureOf[P]) MarshalJSON() ([]byte, error) {
+	if f.PropertiesMode == PropertiesStrict {
+		return f.marshalJSONStrict()
+	}
+
 	jProperties, err := f.jsonProperties()
 	if err != nil {
 		return nil, err
 	}
 	return marshalJSON(f.newFeatureDoc(jProperties))
+}
+
+// marshalJSONStrict encodes the feature preserving the three states of the
+// "properties" member: absent, null and object (even an empty one).
+func (f FeatureOf[P]) marshalJSONStrict() ([]byte, error) {
+	jProperties, err := json.Marshal(f.Properties)
+	if err != nil {
+		return nil, err
+	}
+
+	// a nil/absent properties encodes to "null", omit the member completely
+	// if it was not present when the feature was decoded.
+	omit := !f.PropertiesPresent && bytes.Equal(jProperties, []byte("null"))
+
+	return marshalJSON(f.newStrictFeatureDoc(jProperties, omit))
 }
 
 // MarshalBSON converts the feature object into the proper JSON.
@@ -138,6 +190,38 @@ func (f FeatureOf[P]) newFeatureDoc(properties any) any {
 	return tmp
 }
 
+// newStrictFeatureDoc builds the document used by the PropertiesStrict
+// encoding. A map is used so the "properties" member can be omitted
+// completely when it was absent in the decoded input.
+func (f FeatureOf[P]) newStrictFeatureDoc(properties json.RawMessage, omitProperties bool) map[string]any {
+	var tmp map[string]any
+	if f.ExtraMembers != nil {
+		tmp = f.ExtraMembers.Clone()
+	} else {
+		tmp = make(map[string]any, 5)
+	}
+
+	delete(tmp, "id")
+	if f.ID != nil {
+		tmp["id"] = f.ID
+	}
+	tmp["type"] = "Feature"
+
+	delete(tmp, "bbox")
+	if f.BBox != nil {
+		tmp["bbox"] = f.BBox
+	}
+
+	tmp["geometry"] = NewGeometry(f.Geometry)
+
+	delete(tmp, "properties")
+	if !omitProperties {
+		tmp["properties"] = properties
+	}
+
+	return tmp
+}
+
 // UnmarshalFeature decodes the data into a GeoJSON feature.
 // Alternately one can call json.Unmarshal(f) directly for the same result.
 func UnmarshalFeature(data []byte) (*Feature, error) {
@@ -154,7 +238,7 @@ func UnmarshalFeature(data []byte) (*Feature, error) {
 // into the orb.Geometry types.
 func (f *FeatureOf[P]) UnmarshalJSON(data []byte) error {
 	if bytes.Equal(data, []byte(`null`)) {
-		*f = FeatureOf[P]{}
+		*f = FeatureOf[P]{PropertiesMode: f.PropertiesMode}
 		return nil
 	}
 
@@ -165,7 +249,7 @@ func (f *FeatureOf[P]) UnmarshalJSON(data []byte) error {
 		return err
 	}
 
-	*f = FeatureOf[P]{}
+	*f = FeatureOf[P]{PropertiesMode: f.PropertiesMode}
 	for key, value := range tmp {
 		switch key {
 		case "id":
@@ -194,6 +278,7 @@ func (f *FeatureOf[P]) UnmarshalJSON(data []byte) error {
 				f.Geometry = g.Geometry()
 			}
 		case "properties":
+			f.PropertiesPresent = true
 			err := unmarshalJSON(value, &f.Properties)
 			if err != nil {
 				return err

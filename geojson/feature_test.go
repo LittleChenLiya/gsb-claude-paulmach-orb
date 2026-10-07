@@ -3,7 +3,9 @@ package geojson
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -479,6 +481,171 @@ func TestMarshalRing(t *testing.T) {
 	if !bytes.Equal(data, []byte(`{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[0,0],[1,1],[2,1],[0,0]]]},"properties":null}`)) {
 		t.Errorf("data not correct")
 		t.Logf("%v", string(data))
+	}
+}
+
+func TestFeaturePropertiesMode_strictRoundTrip(t *testing.T) {
+	// Three features whose JSON differs only in the few bytes of the
+	// "properties" member: absent, null and an empty object.
+	cases := []struct {
+		name         string
+		input        string
+		present      bool
+		nilProps     bool
+		strictOutput string
+		compatOutput string
+	}{
+		{
+			name:         "missing properties",
+			input:        `{"type":"Feature","id":7,"geometry":null}`,
+			present:      false,
+			nilProps:     true,
+			strictOutput: `{"geometry":null,"id":7,"type":"Feature"}`,
+			compatOutput: `{"id":7,"type":"Feature","geometry":null,"properties":null}`,
+		},
+		{
+			name:         "null properties",
+			input:        `{"type":"Feature","id":7,"geometry":null,"properties":null}`,
+			present:      true,
+			nilProps:     true,
+			strictOutput: `{"geometry":null,"id":7,"properties":null,"type":"Feature"}`,
+			compatOutput: `{"id":7,"type":"Feature","geometry":null,"properties":null}`,
+		},
+		{
+			name:         "empty object properties",
+			input:        `{"type":"Feature","id":7,"geometry":null,"properties":{}}`,
+			present:      true,
+			nilProps:     false,
+			strictOutput: `{"geometry":null,"id":7,"properties":{},"type":"Feature"}`,
+			compatOutput: `{"id":7,"type":"Feature","geometry":null,"properties":null}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := UnmarshalFeature([]byte(tc.input))
+			if err != nil {
+				t.Fatalf("unmarshal error: %v", err)
+			}
+
+			// properties state
+			if f.PropertiesPresent != tc.present {
+				t.Errorf("PropertiesPresent should be %v", tc.present)
+			}
+			if nilProps := f.Properties == nil; nilProps != tc.nilProps {
+				t.Errorf("properties nil should be %v, got: %v", tc.nilProps, f.Properties)
+			}
+			if !tc.nilProps && len(f.Properties) != 0 {
+				t.Errorf("properties should be an empty map, got: %v", f.Properties)
+			}
+
+			// geometry null and id keep their original semantics
+			if f.Geometry != nil {
+				t.Errorf("geometry should be nil, got: %v", f.Geometry)
+			}
+			if id, ok := f.ID.(float64); !ok || id != 7 {
+				t.Errorf("id should be the number 7, got: %T %v", f.ID, f.ID)
+			}
+
+			// strict re-encoding preserves the three states
+			f.PropertiesMode = PropertiesStrict
+			data, err := f.MarshalJSON()
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+			if !bytes.Equal(data, []byte(tc.strictOutput)) {
+				t.Errorf("strict output incorrect:\n got: %s\nwant: %s", data, tc.strictOutput)
+			}
+
+			// default (compat) output is unchanged
+			f.PropertiesMode = PropertiesCompat
+			data, err = f.MarshalJSON()
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+			if !bytes.Equal(data, []byte(tc.compatOutput)) {
+				t.Errorf("compat output incorrect:\n got: %s\nwant: %s", data, tc.compatOutput)
+			}
+		})
+	}
+}
+
+func TestFeaturePropertiesMode_presetSurvivesDecode(t *testing.T) {
+	f := &Feature{PropertiesMode: PropertiesStrict}
+	err := f.UnmarshalJSON([]byte(`{"type":"Feature","geometry":null,"properties":{}}`))
+	if err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if f.PropertiesMode != PropertiesStrict {
+		t.Fatalf("decode should keep the preset properties mode")
+	}
+
+	data, err := f.MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	expected := `{"geometry":null,"properties":{},"type":"Feature"}`
+	if !bytes.Equal(data, []byte(expected)) {
+		t.Errorf("strict output incorrect:\n got: %s\nwant: %s", data, expected)
+	}
+}
+
+func TestFeaturePropertiesMode_tempDirFixture(t *testing.T) {
+	dir := t.TempDir()
+
+	inputs := []string{
+		`{"type":"Feature","id":7,"geometry":null}`,
+		`{"type":"Feature","id":7,"geometry":null,"properties":null}`,
+		`{"type":"Feature","id":7,"geometry":null,"properties":{}}`,
+	}
+
+	for i, in := range inputs {
+		f, err := UnmarshalFeature([]byte(in))
+		if err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+		f.PropertiesMode = PropertiesStrict
+
+		data, err := f.MarshalJSON()
+		if err != nil {
+			t.Fatalf("marshal error: %v", err)
+		}
+
+		path := filepath.Join(dir, fmt.Sprintf("feature-%d.json", i))
+		err = os.WriteFile(path, data, 0o644)
+		if err != nil {
+			t.Fatalf("write file error: %v", err)
+		}
+
+		// read the fixture back and verify the state survives a second
+		// decode/encode round trip unchanged.
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read file error: %v", err)
+		}
+
+		f2, err := UnmarshalFeature(raw)
+		if err != nil {
+			t.Fatalf("unmarshal error: %v", err)
+		}
+		f2.PropertiesMode = PropertiesStrict
+
+		if f2.PropertiesPresent != f.PropertiesPresent {
+			t.Errorf("case %d: PropertiesPresent should survive the file round trip", i)
+		}
+		if (f2.Properties == nil) != (f.Properties == nil) {
+			t.Errorf("case %d: properties nil state should survive the file round trip", i)
+		}
+
+		data2, err := f2.MarshalJSON()
+		if err != nil {
+			t.Fatalf("marshal error: %v", err)
+		}
+		if !bytes.Equal(data2, data) {
+			t.Errorf("case %d: file round trip not stable:\n got: %s\nwant: %s", i, data2, data)
+		}
 	}
 }
 
