@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## Unreleased
+
+### Added
+
+-   Lossless GeoJSON ring closing: `Polygon.Close` and `MultiPolygon.Close` append the first point to non-empty rings that are not closed, leave already closed rings untouched, preserve coordinates, dimensions and hole order, and return a located `*RingError` (wrapping `ErrRingTooFewPoints`) without modifying the geometry when a ring has fewer than 3 distinct points. Exposed for arbitrary geometries via `orb.CloseRings`/`orb.ValidateRings` and `geojson.CloseRings`/`Geometry.CloseRings`.
+
 ## [v0.13.0](https://github.com/paulmach/orb/compare/v0.12.0...v0.13.0) - 2026-03-30
 
 ### Fixed
