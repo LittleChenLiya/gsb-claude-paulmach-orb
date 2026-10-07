@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -608,6 +609,183 @@ func BenchmarkFeatureUnmarshalBSON(b *testing.B) {
 		err = bson.Unmarshal(bdata, &tile)
 		if err != nil {
 			b.Fatalf("could not unmarshal: %v", err)
+		}
+	}
+}
+
+func TestFeaturePropertiesState_roundTrip(t *testing.T) {
+	// Three features that differ only by a few bytes in the
+	// "properties" member: key missing, explicit null, empty object.
+	cases := []struct {
+		name       string
+		data       string
+		state      PropertiesState
+		properties Properties
+	}{
+		{
+			name:       "missing properties key",
+			data:       `{"id":7,"type":"Feature","geometry":null}`,
+			state:      PropertiesStateMissing,
+			properties: nil,
+		},
+		{
+			name:       "null properties",
+			data:       `{"id":7,"type":"Feature","geometry":null,"properties":null}`,
+			state:      PropertiesStateNull,
+			properties: nil,
+		},
+		{
+			name:       "empty object properties",
+			data:       `{"id":7,"type":"Feature","geometry":null,"properties":{}}`,
+			state:      PropertiesStateObject,
+			properties: Properties{},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, err := UnmarshalFeature([]byte(tc.data))
+			if err != nil {
+				t.Fatalf("unmarshal error: %v", err)
+			}
+
+			if f.PropertiesState != tc.state {
+				t.Errorf("incorrect properties state: %v != %v", f.PropertiesState, tc.state)
+			}
+
+			if f.Geometry != nil {
+				t.Errorf("geometry should stay nil: %v", f.Geometry)
+			}
+
+			if id, ok := f.ID.(float64); !ok || id != 7 {
+				t.Errorf("id should be preserved: %v (%T)", f.ID, f.ID)
+			}
+
+			if tc.properties == nil {
+				if f.Properties != nil {
+					t.Errorf("properties should be nil: %v", f.Properties)
+				}
+			} else {
+				if f.Properties == nil || len(f.Properties) != 0 {
+					t.Errorf("properties should be an empty non-nil map: %v", f.Properties)
+				}
+			}
+
+			// strict marshaling must reproduce the input exactly
+			PropertiesMarshaling = PropertiesRoundTrip
+			defer func() { PropertiesMarshaling = PropertiesCollapseEmpty }()
+
+			blob, err := f.MarshalJSON()
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+
+			if string(blob) != tc.data {
+				t.Errorf("strict round trip mismatch:\nhave: %s\nwant: %s", blob, tc.data)
+			}
+
+			// decoding the re-encoded data must preserve the tri-state
+			f2, err := UnmarshalFeature(blob)
+			if err != nil {
+				t.Fatalf("re-unmarshal error: %v", err)
+			}
+
+			if f2.PropertiesState != tc.state {
+				t.Errorf("state not preserved after round trip: %v != %v", f2.PropertiesState, tc.state)
+			}
+
+			// default marshaling stays backwards compatible: everything
+			// collapses to "properties":null
+			PropertiesMarshaling = PropertiesCollapseEmpty
+			blob, err = f.MarshalJSON()
+			if err != nil {
+				t.Fatalf("marshal error: %v", err)
+			}
+
+			expected := `{"id":7,"type":"Feature","geometry":null,"properties":null}`
+			if string(blob) != expected {
+				t.Errorf("default output changed:\nhave: %s\nwant: %s", blob, expected)
+			}
+		})
+	}
+}
+
+func TestFeaturePropertiesState_roundTripWithData(t *testing.T) {
+	// a feature with actual properties and a geometry must round trip
+	// unchanged under the strict strategy as well
+	data := `{"id":"abc","type":"Feature","geometry":{"type":"Point","coordinates":[1,2]},"properties":{"a":1}}`
+
+	f, err := UnmarshalFeature([]byte(data))
+	if err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	if f.PropertiesState != PropertiesStateObject {
+		t.Errorf("incorrect properties state: %v", f.PropertiesState)
+	}
+
+	PropertiesMarshaling = PropertiesRoundTrip
+	defer func() { PropertiesMarshaling = PropertiesCollapseEmpty }()
+
+	blob, err := f.MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	if string(blob) != data {
+		t.Errorf("strict round trip mismatch:\nhave: %s\nwant: %s", blob, data)
+	}
+
+	// a feature created in code has an unknown state and falls back
+	// to the default behavior even under the strict strategy
+	f = NewFeature(orb.Point{1, 2})
+	blob, err = f.MarshalJSON()
+	if err != nil {
+		t.Fatalf("marshal error: %v", err)
+	}
+
+	if !bytes.Contains(blob, []byte(`"properties":null`)) {
+		t.Errorf("unknown state should fall back to null properties: %s", blob)
+	}
+}
+
+func TestFeaturePropertiesState_tempDirFixture(t *testing.T) {
+	// the same tri-state round trip but driven by small fixture files
+	// in a temporary directory
+	dir := t.TempDir()
+
+	fixtures := map[string]string{
+		"missing.json": `{"id":7,"type":"Feature","geometry":null}`,
+		"null.json":    `{"id":7,"type":"Feature","geometry":null,"properties":null}`,
+		"empty.json":   `{"id":7,"type":"Feature","geometry":null,"properties":{}}`,
+	}
+
+	PropertiesMarshaling = PropertiesRoundTrip
+	defer func() { PropertiesMarshaling = PropertiesCollapseEmpty }()
+
+	for name, want := range fixtures {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(want), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read fixture: %v", err)
+		}
+
+		f, err := UnmarshalFeature(data)
+		if err != nil {
+			t.Fatalf("unmarshal %s: %v", name, err)
+		}
+
+		blob, err := f.MarshalJSON()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", name, err)
+		}
+
+		if string(blob) != want {
+			t.Errorf("%s round trip mismatch:\nhave: %s\nwant: %s", name, blob, want)
 		}
 	}
 }

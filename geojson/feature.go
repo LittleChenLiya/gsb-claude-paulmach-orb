@@ -9,6 +9,47 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
+// A PropertiesState describes how the "properties" member of a feature
+// was represented in the JSON data the feature was decoded from.
+// It allows the tri-state of a missing key, an explicit null and an
+// (empty) object to be distinguished.
+type PropertiesState byte
+
+const (
+	// PropertiesStateUnknown means the state is not known, e.g. the
+	// feature was created in code and not decoded from JSON data.
+	PropertiesStateUnknown PropertiesState = iota
+	// PropertiesStateMissing means the "properties" key was not present.
+	PropertiesStateMissing
+	// PropertiesStateNull means the "properties" key was explicitly null.
+	PropertiesStateNull
+	// PropertiesStateObject means the "properties" key was an object,
+	// possibly empty.
+	PropertiesStateObject
+)
+
+// A PropertiesMarshalingMode defines the strategy used to serialize the
+// "properties" member of a feature.
+type PropertiesMarshalingMode byte
+
+const (
+	// PropertiesCollapseEmpty is the default and historic behavior:
+	// a missing, null or empty object properties value is serialized
+	// as "properties":null.
+	PropertiesCollapseEmpty PropertiesMarshalingMode = iota
+	// PropertiesRoundTrip uses the feature's PropertiesState, recorded
+	// during unmarshalling, to re-encode the properties member exactly:
+	// a missing key stays missing, an explicit null stays null and an
+	// empty object stays an empty object. Features whose state is unknown,
+	// e.g. created in code, fall back to PropertiesCollapseEmpty behavior.
+	PropertiesRoundTrip
+)
+
+// PropertiesMarshaling controls how the "properties" member of a feature
+// is serialized by MarshalJSON. The default, PropertiesCollapseEmpty,
+// matches the historic behavior of this package.
+var PropertiesMarshaling = PropertiesCollapseEmpty
+
 // A FeatureOf corresponds to GeoJSON feature object but allows for a generic type for the properties.
 // This allows users to unmarshal into a struct instead of a map if they choose.
 //
@@ -20,6 +61,13 @@ type FeatureOf[P any] struct {
 	BBox       BBox         `json:"bbox,omitempty"`
 	Geometry   orb.Geometry `json:"geometry"`
 	Properties P            `json:"properties"`
+
+	// PropertiesState records how the "properties" member was represented
+	// when the feature was decoded from JSON. It allows the tri-state of
+	// a missing key, an explicit null and an (empty) object to round trip
+	// when PropertiesMarshaling is set to PropertiesRoundTrip. The default
+	// marshalling ignores it.
+	PropertiesState PropertiesState `json:"-" bson:"-"`
 
 	// ExtraMembers can be used to encoded/decode extra key/members in
 	// the base of the feature object. Note that keys of "id", "type", "bbox"
@@ -59,6 +107,20 @@ func (f FeatureOf[P]) MarshalJSON() ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if PropertiesMarshaling == PropertiesRoundTrip {
+		switch f.PropertiesState {
+		case PropertiesStateMissing:
+			return marshalJSON(f.newFeatureDocNoProperties())
+		case PropertiesStateObject:
+			if len(jProperties) == 0 { // collapsed empty object
+				jProperties = json.RawMessage(`{}`)
+			}
+		}
+		// PropertiesStateNull needs no special handling, nil properties
+		// already encode as an explicit null.
+	}
+
 	return marshalJSON(f.newFeatureDoc(jProperties))
 }
 
@@ -138,6 +200,39 @@ func (f FeatureOf[P]) newFeatureDoc(properties any) any {
 	return tmp
 }
 
+// newFeatureDocNoProperties builds the feature document without a
+// "properties" member, used to round trip a missing properties key
+// when PropertiesMarshaling is set to PropertiesRoundTrip.
+func (f FeatureOf[P]) newFeatureDocNoProperties() any {
+	if len(f.ExtraMembers) == 0 {
+		return &featureDocNoProperties{
+			ID:       f.ID,
+			Type:     "Feature",
+			BBox:     f.BBox,
+			Geometry: NewGeometry(f.Geometry),
+		}
+	}
+
+	tmp := f.ExtraMembers.Clone()
+
+	delete(tmp, "properties")
+
+	delete(tmp, "id")
+	if f.ID != nil {
+		tmp["id"] = f.ID
+	}
+	tmp["type"] = "Feature"
+
+	delete(tmp, "bbox")
+	if f.BBox != nil {
+		tmp["bbox"] = f.BBox
+	}
+
+	tmp["geometry"] = NewGeometry(f.Geometry)
+
+	return tmp
+}
+
 // UnmarshalFeature decodes the data into a GeoJSON feature.
 // Alternately one can call json.Unmarshal(f) directly for the same result.
 func UnmarshalFeature(data []byte) (*Feature, error) {
@@ -166,6 +261,7 @@ func (f *FeatureOf[P]) UnmarshalJSON(data []byte) error {
 	}
 
 	*f = FeatureOf[P]{}
+	f.PropertiesState = PropertiesStateMissing
 	for key, value := range tmp {
 		switch key {
 		case "id":
@@ -194,6 +290,12 @@ func (f *FeatureOf[P]) UnmarshalJSON(data []byte) error {
 				f.Geometry = g.Geometry()
 			}
 		case "properties":
+			if bytes.Equal(value, nocopyRawMessage(`null`)) {
+				f.PropertiesState = PropertiesStateNull
+			} else {
+				f.PropertiesState = PropertiesStateObject
+			}
+
 			err := unmarshalJSON(value, &f.Properties)
 			if err != nil {
 				return err
@@ -285,4 +387,11 @@ type featureDoc[P any] struct {
 	BBox       BBox      `json:"bbox,omitempty" bson:"bbox,omitempty"`
 	Geometry   *Geometry `json:"geometry" bson:"geometry"`
 	Properties P         `json:"properties" bson:"properties"`
+}
+
+type featureDocNoProperties struct {
+	ID       any       `json:"id,omitempty"`
+	Type     string    `json:"type"`
+	BBox     BBox      `json:"bbox,omitempty"`
+	Geometry *Geometry `json:"geometry"`
 }
